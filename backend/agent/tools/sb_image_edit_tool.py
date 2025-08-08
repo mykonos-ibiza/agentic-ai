@@ -7,7 +7,7 @@ from io import BytesIO
 import uuid
 from litellm import aimage_generation, aimage_edit
 import base64
-from utils.network import validate_public_http_url, is_ip_disallowed
+from utils.network import validate_public_http_url, is_ip_disallowed, async_download_image_httpx
 
 MAX_IMAGE_SIZE = 10 * 1024 * 1024
 
@@ -119,31 +119,8 @@ class SandboxImageEditTool(SandboxToolsBase):
     async def _download_image_from_url(self, url: str) -> bytes | ToolResult:
         """Download image from URL with SSRF protections and size limits."""
         try:
-            safe_url = self._validate_outbound_url(url)
-            async with httpx.AsyncClient(follow_redirects=False, timeout=httpx.Timeout(15.0)) as client:
-                resp = await client.get(safe_url)
-                resp.raise_for_status()
-                # Content-Type check
-                mime_type = resp.headers.get("Content-Type", "")
-                if not mime_type.startswith("image/"):
-                    return self.fail_response(f"URL does not point to an image (Content-Type: {mime_type}): {safe_url}")
-                # Content-Length pre-check
-                cl = resp.headers.get("Content-Length")
-                if cl is not None:
-                    try:
-                        if int(cl) > MAX_IMAGE_SIZE:
-                            return self.fail_response("Image is too large")
-                    except ValueError:
-                        pass
-                # Enforce hard cap
-                content = b""
-                async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
-                    if not chunk:
-                        continue
-                    content += chunk
-                    if len(content) > MAX_IMAGE_SIZE:
-                        return self.fail_response("Downloaded image exceeds maximum allowed size")
-                return content
+            content, _mime = await async_download_image_httpx(url, MAX_IMAGE_SIZE)
+            return content
         except Exception as e:
             return self.fail_response(f"Could not download image from URL: {str(e)}")
 

@@ -7,6 +7,8 @@ __all__ = [
     "is_ip_disallowed",
     "validate_public_http_url",
     "safe_follow_redirects_requests",
+    "download_image_requests",
+    "async_download_image_httpx",
 ]
 
 
@@ -81,3 +83,71 @@ def safe_follow_redirects_requests(session, url: str, headers: Optional[dict] = 
         next_url = urljoin(current_url, resp.headers['Location'])
         current_url = validate_public_http_url(next_url)
     raise ValueError("Too many redirects")
+
+
+def download_image_requests(url: str, max_size_bytes: int, headers: Optional[dict] = None, max_redirects: int = 3) -> Tuple[bytes, str]:
+    """Download an image using requests with SSRF protections and size/content-type checks.
+    Returns (image_bytes, mime_type).
+    """
+    import requests
+
+    headers = headers or {"User-Agent": "Mozilla/5.0"}
+    with requests.Session() as session:
+        final_url = safe_follow_redirects_requests(session, url, headers=headers, max_redirects=max_redirects)
+        resp = session.get(final_url, timeout=10, headers=headers, allow_redirects=False, stream=True)
+        resp.raise_for_status()
+
+        mime_type = resp.headers.get("Content-Type", "")
+        if not mime_type.startswith("image/"):
+            raise ValueError(f"URL does not point to an image (Content-Type: {mime_type}): {final_url}")
+
+        cl_header = resp.headers.get("Content-Length")
+        if cl_header is not None:
+            try:
+                if int(cl_header) > max_size_bytes:
+                    raise ValueError("Image is too large")
+            except (TypeError, ValueError):
+                pass
+
+        downloaded = 0
+        chunks = bytearray()
+        for chunk in resp.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            downloaded += len(chunk)
+            if downloaded > max_size_bytes:
+                raise ValueError("Downloaded image exceeds maximum allowed size")
+            chunks.extend(chunk)
+        return bytes(chunks), mime_type
+
+
+async def async_download_image_httpx(url: str, max_size_bytes: int, headers: Optional[dict] = None, max_redirects: int = 0) -> Tuple[bytes, str]:
+    """Download an image using httpx with SSRF protections and size/content-type checks.
+    Does not follow redirects automatically; caller can set max_redirects>0 to implement manual logic later.
+    Returns (image_bytes, mime_type).
+    """
+    import httpx
+
+    headers = headers or {"User-Agent": "Mozilla/5.0"}
+    safe_url = validate_public_http_url(url)
+    async with httpx.AsyncClient(follow_redirects=False, timeout=httpx.Timeout(15.0)) as client:
+        resp = await client.get(safe_url, headers=headers)
+        resp.raise_for_status()
+        mime_type = resp.headers.get("Content-Type", "")
+        if not mime_type.startswith("image/"):
+            raise ValueError(f"URL does not point to an image (Content-Type: {mime_type}): {safe_url}")
+        cl = resp.headers.get("Content-Length")
+        if cl is not None:
+            try:
+                if int(cl) > max_size_bytes:
+                    raise ValueError("Image is too large")
+            except ValueError:
+                pass
+        content = bytearray()
+        async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            content.extend(chunk)
+            if len(content) > max_size_bytes:
+                raise ValueError("Downloaded image exceeds maximum allowed size")
+        return bytes(content), mime_type

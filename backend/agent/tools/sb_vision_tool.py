@@ -10,7 +10,7 @@ from sandbox.tool_base import SandboxToolsBase
 from agentpress.thread_manager import ThreadManager
 import json
 import requests
-from utils.network import validate_public_http_url, safe_follow_redirects_requests, is_ip_disallowed
+from utils.network import validate_public_http_url, safe_follow_redirects_requests, is_ip_disallowed, download_image_requests
 
 # Add common image MIME types if mimetypes module is limited
 mimetypes.add_type("image/webp", ".webp")
@@ -119,47 +119,9 @@ class SandboxVisionTool(SandboxToolsBase):
     def download_image_from_url(self, url: str) -> Tuple[bytes, str]:
         """Download image from a URL with SSRF protections."""
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0"
-            }
-
-            with requests.Session() as session:
-                # Resolve safe final URL via validated redirect handling
-                final_url = self._safe_follow_redirects(session, url, headers)
-
-                # Perform GET without auto-redirects
-                get_resp = session.get(final_url, timeout=10, headers=headers, allow_redirects=False, stream=True)
-                get_resp.raise_for_status()
-
-                # Enforce content type is image
-                mime_type = get_resp.headers.get('Content-Type', '')
-                if not mime_type.startswith('image/'):
-                    raise Exception(f"URL does not point to an image (Content-Type: {mime_type}): {final_url}")
-
-                # Check Content-Length header if present
-                cl_header = get_resp.headers.get('Content-Length')
-                if cl_header is not None:
-                    try:
-                        content_length = int(cl_header)
-                        if content_length > MAX_IMAGE_SIZE:
-                            raise Exception(f"Image is too large ({(content_length)/(1024*1024):.2f}MB) for the maximum allowed size of {MAX_IMAGE_SIZE/(1024*1024):.2f}MB")
-                    except (TypeError, ValueError):
-                        # Ignore unparsable Content-Length; fall back to streaming cap
-                        pass
-
-                # Stream download with hard cap
-                bytes_io = BytesIO()
-                downloaded = 0
-                for chunk in get_resp.iter_content(chunk_size=64 * 1024):
-                    if not chunk:
-                        continue
-                    downloaded += len(chunk)
-                    if downloaded > MAX_IMAGE_SIZE:
-                        raise Exception(f"Downloaded image is too large ({(downloaded)/(1024*1024):.2f}MB). Maximum allowed size of {MAX_IMAGE_SIZE/(1024*1024):.2f}MB")
-                    bytes_io.write(chunk)
-                image_bytes = bytes_io.getvalue()
-
-                return image_bytes, mime_type
+            headers = {"User-Agent": "Mozilla/5.0"}
+            image_bytes, mime_type = download_image_requests(url, MAX_IMAGE_SIZE, headers=headers)
+            return image_bytes, mime_type
         except Exception as e:
             return self.fail_response(f"Failed to download image from URL: {str(e)}")
     
