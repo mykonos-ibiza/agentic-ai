@@ -7,9 +7,7 @@ from io import BytesIO
 import uuid
 from litellm import aimage_generation, aimage_edit
 import base64
-import ipaddress
-import socket
-from urllib.parse import urlparse
+from utils.network import validate_public_http_url, is_ip_disallowed
 
 MAX_IMAGE_SIZE = 10 * 1024 * 1024
 
@@ -113,39 +111,10 @@ class SandboxImageEditTool(SandboxToolsBase):
             )
 
     def _is_ip_disallowed(self, ip: str) -> bool:
-        try:
-            ip_obj = ipaddress.ip_address(ip)
-            return (
-                ip_obj.is_private
-                or ip_obj.is_loopback
-                or ip_obj.is_link_local
-                or ip_obj.is_multicast
-                or ip_obj.is_reserved
-                or ip_obj.is_unspecified
-            )
-        except ValueError:
-            return True
+        return is_ip_disallowed(ip)
 
     def _validate_outbound_url(self, url: str) -> str:
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            raise ValueError("Only http/https URLs are allowed")
-        if not parsed.hostname:
-            raise ValueError("URL must include a hostname")
-        port = parsed.port
-        if port is not None and port not in (80, 443):
-            raise ValueError("Only ports 80 and 443 are allowed")
-        try:
-            resolved = socket.getaddrinfo(parsed.hostname, port or (443 if parsed.scheme == "https" else 80))
-        except socket.gaierror:
-            raise ValueError("Hostname could not be resolved")
-        ips = {item[4][0] for item in resolved if item and item[4]}
-        if not ips:
-            raise ValueError("No IPs resolved for hostname")
-        for ip in ips:
-            if self._is_ip_disallowed(ip):
-                raise ValueError("URL resolves to a disallowed IP address")
-        return url
+        return validate_public_http_url(url)
 
     async def _download_image_from_url(self, url: str) -> bytes | ToolResult:
         """Download image from URL with SSRF protections and size limits."""

@@ -7,9 +7,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from collections import OrderedDict
-import socket
-import ipaddress
-from urllib.parse import urlparse
+from utils.network import validate_public_http_url, is_ip_disallowed
 
 from mcp import ClientSession
 from mcp.client.sse import sse_client
@@ -305,39 +303,13 @@ class MCPService:
             raise CustomMCPError(f"Unsupported request type: {request_type}")
     
     def _is_ip_disallowed(self, ip: str) -> bool:
-        try:
-            ip_obj = ipaddress.ip_address(ip)
-            return (
-                ip_obj.is_private
-                or ip_obj.is_loopback
-                or ip_obj.is_link_local
-                or ip_obj.is_multicast
-                or ip_obj.is_reserved
-                or ip_obj.is_unspecified
-            )
-        except ValueError:
-            return True
+        return is_ip_disallowed(ip)
 
     def _validate_outbound_url(self, url: str) -> str:
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            raise MCPProviderError("Only http/https URLs are allowed for MCP servers")
-        if not parsed.hostname:
-            raise MCPProviderError("MCP server URL must include a hostname")
-        port = parsed.port
-        if port is not None and port not in (80, 443):
-            raise MCPProviderError("Only ports 80 and 443 are allowed for MCP servers")
         try:
-            resolved = socket.getaddrinfo(parsed.hostname, port or (443 if parsed.scheme == "https" else 80))
-        except socket.gaierror:
-            raise MCPProviderError("MCP server hostname could not be resolved")
-        ips = {item[4][0] for item in resolved if item and item[4]}
-        if not ips:
-            raise MCPProviderError("No IPs resolved for MCP server hostname")
-        for ip in ips:
-            if self._is_ip_disallowed(ip):
-                raise MCPProviderError("MCP server URL resolves to a disallowed IP address")
-        return url
+            return validate_public_http_url(url)
+        except ValueError as e:
+            raise MCPProviderError(str(e))
 
     async def _discover_http_tools(self, config: Dict[str, Any]) -> CustomMCPConnectionResult:
         url = config.get("url")

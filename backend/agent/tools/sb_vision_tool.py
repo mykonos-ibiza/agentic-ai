@@ -10,9 +10,7 @@ from sandbox.tool_base import SandboxToolsBase
 from agentpress.thread_manager import ThreadManager
 import json
 import requests
-import socket
-import ipaddress
-from urllib.parse import urljoin
+from utils.network import validate_public_http_url, safe_follow_redirects_requests, is_ip_disallowed
 
 # Add common image MIME types if mimetypes module is limited
 mimetypes.add_type("image/webp", ".webp")
@@ -110,65 +108,13 @@ class SandboxVisionTool(SandboxToolsBase):
         return parsed_url.scheme in ('http', 'https')
     
     def _is_ip_disallowed(self, ip: str) -> bool:
-        """Return True if IP is private/loopback/link-local/multicast/reserved/unspecified."""
-        try:
-            ip_obj = ipaddress.ip_address(ip)
-            return (
-                ip_obj.is_private
-                or ip_obj.is_loopback
-                or ip_obj.is_link_local
-                or ip_obj.is_multicast
-                or ip_obj.is_reserved
-                or ip_obj.is_unspecified
-            )
-        except ValueError:
-            return True
+        return is_ip_disallowed(ip)
 
     def _validate_outbound_url(self, url: str) -> str:
-        """Validate URL scheme, port, and DNS resolution to public IPs only. Return normalized URL."""
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            raise ValueError("Only http/https URLs are allowed")
-        if not parsed.hostname:
-            raise ValueError("URL must include a hostname")
-        # Restrict ports to 80/443 (or default if None)
-        port = parsed.port
-        if port is not None and port not in (80, 443):
-            raise ValueError("Only ports 80 and 443 are allowed")
-        # Resolve hostname and ensure all resolved IPs are public
-        try:
-            # Use default port to avoid separate SRV lookups
-            resolved = socket.getaddrinfo(parsed.hostname, port or (443 if parsed.scheme == "https" else 80))
-        except socket.gaierror:
-            raise ValueError("Hostname could not be resolved")
-        ips = {item[4][0] for item in resolved if item and item[4]}
-        if not ips:
-            raise ValueError("No IPs resolved for hostname")
-        for ip in ips:
-            if self._is_ip_disallowed(ip):
-                raise ValueError("URL resolves to a disallowed IP address")
-        # Normalize by removing default ports
-        netloc = parsed.hostname
-        if port and port not in (80, 443):
-            netloc = f"{parsed.hostname}:{port}"
-        elif parsed.scheme == "http" and port == 80:
-            netloc = parsed.hostname
-        elif parsed.scheme == "https" and port == 443:
-            netloc = parsed.hostname
-        normalized = parsed._replace(netloc=netloc).geturl()
-        return normalized
+        return validate_public_http_url(url)
 
     def _safe_follow_redirects(self, session: requests.Session, url: str, headers: dict, max_redirects: int = 3) -> str:
-        """Perform a HEAD request without following redirects; manually follow with validation."""
-        current_url = self._validate_outbound_url(url)
-        for _ in range(max_redirects):
-            resp = session.head(current_url, timeout=10, headers=headers, allow_redirects=False)
-            # If no redirect, return current URL
-            if resp.status_code < 300 or resp.status_code >= 400 or 'Location' not in resp.headers:
-                return current_url
-            next_url = urljoin(current_url, resp.headers['Location'])
-            current_url = self._validate_outbound_url(next_url)
-        raise ValueError("Too many redirects")
+        return safe_follow_redirects_requests(session, url, headers=headers, max_redirects=max_redirects)
 
     def download_image_from_url(self, url: str) -> Tuple[bytes, str]:
         """Download image from a URL with SSRF protections."""
