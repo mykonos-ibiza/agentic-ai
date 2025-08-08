@@ -7,7 +7,11 @@ from io import BytesIO
 import uuid
 from litellm import aimage_generation, aimage_edit
 import base64
+import ipaddress
+import socket
+from urllib.parse import urlparse
 
+MAX_IMAGE_SIZE = 10 * 1024 * 1024
 
 class SandboxImageEditTool(SandboxToolsBase):
     """Tool for generating or editing images using OpenAI GPT Image 1 via OpenAI SDK (no mask support)."""
@@ -108,22 +112,71 @@ class SandboxImageEditTool(SandboxToolsBase):
                 f"An error occurred during image generation/editing: {str(e)}"
             )
 
-    async def _get_image_bytes(self, image_path: str) -> bytes | ToolResult:
-        """Get image bytes from URL or local file path."""
-        if image_path.startswith(("http://", "https://")):
-            return await self._download_image_from_url(image_path)
-        else:
-            return await self._read_image_from_sandbox(image_path)
+    def _is_ip_disallowed(self, ip: str) -> bool:
+        try:
+            ip_obj = ipaddress.ip_address(ip)
+            return (
+                ip_obj.is_private
+                or ip_obj.is_loopback
+                or ip_obj.is_link_local
+                or ip_obj.is_multicast
+                or ip_obj.is_reserved
+                or ip_obj.is_unspecified
+            )
+        except ValueError:
+            return True
+
+    def _validate_outbound_url(self, url: str) -> str:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("Only http/https URLs are allowed")
+        if not parsed.hostname:
+            raise ValueError("URL must include a hostname")
+        port = parsed.port
+        if port is not None and port not in (80, 443):
+            raise ValueError("Only ports 80 and 443 are allowed")
+        try:
+            resolved = socket.getaddrinfo(parsed.hostname, port or (443 if parsed.scheme == "https" else 80))
+        except socket.gaierror:
+            raise ValueError("Hostname could not be resolved")
+        ips = {item[4][0] for item in resolved if item and item[4]}
+        if not ips:
+            raise ValueError("No IPs resolved for hostname")
+        for ip in ips:
+            if self._is_ip_disallowed(ip):
+                raise ValueError("URL resolves to a disallowed IP address")
+        return url
 
     async def _download_image_from_url(self, url: str) -> bytes | ToolResult:
-        """Download image from URL."""
+        """Download image from URL with SSRF protections and size limits."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                return response.content
-        except Exception:
-            return self.fail_response(f"Could not download image from URL: {url}")
+            safe_url = self._validate_outbound_url(url)
+            async with httpx.AsyncClient(follow_redirects=False, timeout=httpx.Timeout(15.0)) as client:
+                resp = await client.get(safe_url)
+                resp.raise_for_status()
+                # Content-Type check
+                mime_type = resp.headers.get("Content-Type", "")
+                if not mime_type.startswith("image/"):
+                    return self.fail_response(f"URL does not point to an image (Content-Type: {mime_type}): {safe_url}")
+                # Content-Length pre-check
+                cl = resp.headers.get("Content-Length")
+                if cl is not None:
+                    try:
+                        if int(cl) > MAX_IMAGE_SIZE:
+                            return self.fail_response("Image is too large")
+                    except ValueError:
+                        pass
+                # Enforce hard cap
+                content = b""
+                async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    content += chunk
+                    if len(content) > MAX_IMAGE_SIZE:
+                        return self.fail_response("Downloaded image exceeds maximum allowed size")
+                return content
+        except Exception as e:
+            return self.fail_response(f"Could not download image from URL: {str(e)}")
 
     async def _read_image_from_sandbox(self, image_path: str) -> bytes | ToolResult:
         """Read image from sandbox filesystem."""
@@ -144,6 +197,13 @@ class SandboxImageEditTool(SandboxToolsBase):
             return self.fail_response(
                 f"Could not read image file from sandbox: {image_path} - {str(e)}"
             )
+
+    async def _get_image_bytes(self, image_path: str) -> bytes | ToolResult:
+        """Get image bytes from URL or local file path."""
+        if image_path.startswith(("http://", "https://")):
+            return await self._download_image_from_url(image_path)
+        else:
+            return await self._read_image_from_sandbox(image_path)
 
     async def _process_image_response(self, response) -> str | ToolResult:
         """Download generated image and save to sandbox with random name."""

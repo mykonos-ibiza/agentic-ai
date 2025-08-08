@@ -7,6 +7,9 @@ from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from collections import OrderedDict
+import socket
+import ipaddress
+from urllib.parse import urlparse
 
 from mcp import ClientSession
 from mcp.client.sse import sse_client
@@ -301,10 +304,46 @@ class MCPService:
         else:
             raise CustomMCPError(f"Unsupported request type: {request_type}")
     
+    def _is_ip_disallowed(self, ip: str) -> bool:
+        try:
+            ip_obj = ipaddress.ip_address(ip)
+            return (
+                ip_obj.is_private
+                or ip_obj.is_loopback
+                or ip_obj.is_link_local
+                or ip_obj.is_multicast
+                or ip_obj.is_reserved
+                or ip_obj.is_unspecified
+            )
+        except ValueError:
+            return True
+
+    def _validate_outbound_url(self, url: str) -> str:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise MCPProviderError("Only http/https URLs are allowed for MCP servers")
+        if not parsed.hostname:
+            raise MCPProviderError("MCP server URL must include a hostname")
+        port = parsed.port
+        if port is not None and port not in (80, 443):
+            raise MCPProviderError("Only ports 80 and 443 are allowed for MCP servers")
+        try:
+            resolved = socket.getaddrinfo(parsed.hostname, port or (443 if parsed.scheme == "https" else 80))
+        except socket.gaierror:
+            raise MCPProviderError("MCP server hostname could not be resolved")
+        ips = {item[4][0] for item in resolved if item and item[4]}
+        if not ips:
+            raise MCPProviderError("No IPs resolved for MCP server hostname")
+        for ip in ips:
+            if self._is_ip_disallowed(ip):
+                raise MCPProviderError("MCP server URL resolves to a disallowed IP address")
+        return url
+
     async def _discover_http_tools(self, config: Dict[str, Any]) -> CustomMCPConnectionResult:
         url = config.get("url")
         if not url:
             raise CustomMCPError("URL is required for HTTP MCP connections")
+        url = self._validate_outbound_url(url)
         
         try:
             async with streamablehttp_client(url) as (read_stream, write_stream, _):
@@ -346,6 +385,7 @@ class MCPService:
         url = config.get("url")
         if not url:
             raise CustomMCPError("URL is required for SSE MCP connections")
+        url = self._validate_outbound_url(url)
         
         try:
             async with sse_client(url) as (read_stream, write_stream):
@@ -407,7 +447,7 @@ class MCPService:
         url = config.get("url")
         if not url:
             raise MCPProviderError(f"URL not provided for custom MCP server: {qualified_name}")
-        return url
+        return self._validate_outbound_url(url)
     
     def _get_custom_headers(self, qualified_name: str, config: Dict[str, Any], external_user_id: Optional[str] = None) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -436,7 +476,7 @@ class MCPService:
             mcp_url = await profile_service.get_mcp_url_for_runtime(profile_id)
             
             self._logger.info(f"Resolved Composio profile {profile_id} to MCP URL {mcp_url}")
-            return mcp_url
+            return self._validate_outbound_url(mcp_url)
             
         except Exception as e:
             self._logger.error(f"Failed to resolve Composio profile {profile_id}: {str(e)}")
@@ -450,7 +490,8 @@ class MCPService:
     
     def _get_pipedream_server_url(self, qualified_name: str, config: Dict[str, Any]) -> str:
         """Get Pipedream server URL"""
-        return config.get("url", "https://remote.mcp.pipedream.net")
+        url = config.get("url", "https://remote.mcp.pipedream.net")
+        return self._validate_outbound_url(url)
     
     def _get_pipedream_headers(self, qualified_name: str, config: Dict[str, Any], external_user_id: Optional[str] = None) -> Dict[str, str]:
         """Get headers for Pipedream MCP connection"""
