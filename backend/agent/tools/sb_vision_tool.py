@@ -10,6 +10,7 @@ from sandbox.tool_base import SandboxToolsBase
 from agentpress.thread_manager import ThreadManager
 import json
 import requests
+from utils.network import validate_public_http_url, safe_follow_redirects_requests, is_ip_disallowed, download_image_requests
 
 # Add common image MIME types if mimetypes module is limited
 mimetypes.add_type("image/webp", ".webp")
@@ -106,35 +107,20 @@ class SandboxVisionTool(SandboxToolsBase):
         parsed_url = urlparse(file_path)
         return parsed_url.scheme in ('http', 'https')
     
+    def _is_ip_disallowed(self, ip: str) -> bool:
+        return is_ip_disallowed(ip)
+
+    def _validate_outbound_url(self, url: str) -> str:
+        return validate_public_http_url(url)
+
+    def _safe_follow_redirects(self, session: requests.Session, url: str, headers: dict, max_redirects: int = 3) -> str:
+        return safe_follow_redirects_requests(session, url, headers=headers, max_redirects=max_redirects)
+
     def download_image_from_url(self, url: str) -> Tuple[bytes, str]:
-        """Download image from a URL"""
+        """Download image from a URL with SSRF protections."""
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0"  # Some servers block default Python
-            }
-
-            # HEAD request to get the image size
-            head_response = requests.head(url, timeout=10, headers=headers, stream=True)
-            head_response.raise_for_status()
-            
-            # Check content length
-            content_length = int(head_response.headers.get('Content-Length'))
-            if content_length and content_length > MAX_IMAGE_SIZE:
-                raise Exception(f"Image is too large ({(content_length)/(1024*1024):.2f}MB) for the maximum allowed size of {MAX_IMAGE_SIZE/(1024*1024):.2f}MB")
-            
-            # Download the image
-            response = requests.get(url, timeout=10, headers=headers, stream=True)
-            response.raise_for_status()
-
-            image_bytes = response.content
-            if len(image_bytes) > MAX_IMAGE_SIZE:
-                raise Exception(f"Downloaded image is too large ({(len(image_bytes))/(1024*1024):.2f}MB). Maximum allowed size of {MAX_IMAGE_SIZE/(1024*1024):.2f}MB")
-
-            # Get MIME type
-            mime_type = response.headers.get('Content-Type')
-            if not mime_type or not mime_type.startswith('image/'):
-                raise Exception(f"URL does not point to an image (Content-Type: {mime_type}): {url}")
-            
+            headers = {"User-Agent": "Mozilla/5.0"}
+            image_bytes, mime_type = download_image_requests(url, MAX_IMAGE_SIZE, headers=headers)
             return image_bytes, mime_type
         except Exception as e:
             return self.fail_response(f"Failed to download image from URL: {str(e)}")
@@ -255,4 +241,4 @@ class SandboxVisionTool(SandboxToolsBase):
             return self.success_response(f"Successfully loaded and compressed the image '{cleaned_path}' (reduced from {original_size / 1024:.1f}KB to {len(compressed_bytes) / 1024:.1f}KB).")
 
         except Exception as e:
-            return self.fail_response(f"An unexpected error occurred while trying to see the image: {str(e)}") 
+            return self.fail_response(f"An error occurred: {str(e)}") 

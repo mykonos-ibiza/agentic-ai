@@ -7,6 +7,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from collections import OrderedDict
+from utils.network import validate_public_http_url, is_ip_disallowed
 
 from mcp import ClientSession
 from mcp.client.sse import sse_client
@@ -301,10 +302,20 @@ class MCPService:
         else:
             raise CustomMCPError(f"Unsupported request type: {request_type}")
     
+    def _is_ip_disallowed(self, ip: str) -> bool:
+        return is_ip_disallowed(ip)
+
+    def _validate_outbound_url(self, url: str) -> str:
+        try:
+            return validate_public_http_url(url)
+        except ValueError as e:
+            raise MCPProviderError(str(e))
+
     async def _discover_http_tools(self, config: Dict[str, Any]) -> CustomMCPConnectionResult:
         url = config.get("url")
         if not url:
             raise CustomMCPError("URL is required for HTTP MCP connections")
+        url = self._validate_outbound_url(url)
         
         try:
             async with streamablehttp_client(url) as (read_stream, write_stream, _):
@@ -346,6 +357,7 @@ class MCPService:
         url = config.get("url")
         if not url:
             raise CustomMCPError("URL is required for SSE MCP connections")
+        url = self._validate_outbound_url(url)
         
         try:
             async with sse_client(url) as (read_stream, write_stream):
@@ -407,7 +419,7 @@ class MCPService:
         url = config.get("url")
         if not url:
             raise MCPProviderError(f"URL not provided for custom MCP server: {qualified_name}")
-        return url
+        return self._validate_outbound_url(url)
     
     def _get_custom_headers(self, qualified_name: str, config: Dict[str, Any], external_user_id: Optional[str] = None) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -436,7 +448,7 @@ class MCPService:
             mcp_url = await profile_service.get_mcp_url_for_runtime(profile_id)
             
             self._logger.info(f"Resolved Composio profile {profile_id} to MCP URL {mcp_url}")
-            return mcp_url
+            return self._validate_outbound_url(mcp_url)
             
         except Exception as e:
             self._logger.error(f"Failed to resolve Composio profile {profile_id}: {str(e)}")
@@ -450,7 +462,8 @@ class MCPService:
     
     def _get_pipedream_server_url(self, qualified_name: str, config: Dict[str, Any]) -> str:
         """Get Pipedream server URL"""
-        return config.get("url", "https://remote.mcp.pipedream.net")
+        url = config.get("url", "https://remote.mcp.pipedream.net")
+        return self._validate_outbound_url(url)
     
     def _get_pipedream_headers(self, qualified_name: str, config: Dict[str, Any], external_user_id: Optional[str] = None) -> Dict[str, str]:
         """Get headers for Pipedream MCP connection"""

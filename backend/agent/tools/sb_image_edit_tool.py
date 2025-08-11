@@ -7,7 +7,9 @@ from io import BytesIO
 import uuid
 from litellm import aimage_generation, aimage_edit
 import base64
+from utils.network import validate_public_http_url, is_ip_disallowed, async_download_image_httpx
 
+MAX_IMAGE_SIZE = 10 * 1024 * 1024
 
 class SandboxImageEditTool(SandboxToolsBase):
     """Tool for generating or editing images using OpenAI GPT Image 1 via OpenAI SDK (no mask support)."""
@@ -108,22 +110,19 @@ class SandboxImageEditTool(SandboxToolsBase):
                 f"An error occurred during image generation/editing: {str(e)}"
             )
 
-    async def _get_image_bytes(self, image_path: str) -> bytes | ToolResult:
-        """Get image bytes from URL or local file path."""
-        if image_path.startswith(("http://", "https://")):
-            return await self._download_image_from_url(image_path)
-        else:
-            return await self._read_image_from_sandbox(image_path)
+    def _is_ip_disallowed(self, ip: str) -> bool:
+        return is_ip_disallowed(ip)
+
+    def _validate_outbound_url(self, url: str) -> str:
+        return validate_public_http_url(url)
 
     async def _download_image_from_url(self, url: str) -> bytes | ToolResult:
-        """Download image from URL."""
+        """Download image from URL with SSRF protections and size limits."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                return response.content
-        except Exception:
-            return self.fail_response(f"Could not download image from URL: {url}")
+            content, _mime = await async_download_image_httpx(url, MAX_IMAGE_SIZE)
+            return content
+        except Exception as e:
+            return self.fail_response(f"Could not download image from URL: {str(e)}")
 
     async def _read_image_from_sandbox(self, image_path: str) -> bytes | ToolResult:
         """Read image from sandbox filesystem."""
@@ -144,6 +143,13 @@ class SandboxImageEditTool(SandboxToolsBase):
             return self.fail_response(
                 f"Could not read image file from sandbox: {image_path} - {str(e)}"
             )
+
+    async def _get_image_bytes(self, image_path: str) -> bytes | ToolResult:
+        """Get image bytes from URL or local file path."""
+        if image_path.startswith(("http://", "https://")):
+            return await self._download_image_from_url(image_path)
+        else:
+            return await self._read_image_from_sandbox(image_path)
 
     async def _process_image_response(self, response) -> str | ToolResult:
         """Download generated image and save to sandbox with random name."""
